@@ -34,9 +34,10 @@ class WorldStats:
 
 
 class World:
-    def __init__(self, world_config: dict, npcs_config: dict, rng):
+    def __init__(self, world_config: dict, npcs_config: dict, rng, run_days: int | None = None):
         self.config = world_config
         self.rng = rng
+        self._run_days = run_days
         self.locations: dict[str, Location] = {}
         self.resources: dict[str, Resource] = {}
         self.npcs: list[NPC] = []
@@ -150,7 +151,10 @@ class World:
         events_cfg = self.config.get("events", {})
         count = int(events_cfg.get("count", 8))
         min_spacing = int(events_cfg.get("min_spacing_ticks", 24))
-        total_ticks = int(self.config.get("simulation", {}).get("days", 30)) * 24 * (60 // self.clock.tick_minutes)
+        run_days = int(self._run_days) if self._run_days is not None else int(
+            self.config.get("simulation", {}).get("days", 30)
+        )
+        total_ticks = run_days * 24 * (60 // self.clock.tick_minutes)
         last_start: dict[tuple[str, str], int] = {}
         attempts = 0
         while len(self.events) < count and attempts < count * 4:

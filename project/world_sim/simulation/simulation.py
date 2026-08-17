@@ -30,9 +30,10 @@ class Simulation:
         self.seed = seed
         self.rng = random.Random(seed)
         self.days = days if days is not None else int(world_config.get("simulation", {}).get("days", 30))
+        self._total_days = self.days
         self.verbose = verbose
         self.print_report = print_report
-        self.world = World(world_config, npcs_config, self.rng)
+        self.world = World(world_config, npcs_config, self.rng, run_days=self.days)
         self.decision_system = decision_system or RuleBasedDecisionSystem(world_config, self.rng)
         self.perception_system = PerceptionSystem()
         self.needs_system = NeedsSystem(world_config)
@@ -42,11 +43,12 @@ class Simulation:
             world_config.get("needs", {}).get("thresholds", {}).get("hunger", 80)
         )
 
-    def run(self) -> None:
+    def run(self, days: Optional[int] = None) -> None:
         world = self.world
-        log.info(f"Starting simulation: {len(world.npcs)} NPCs, {self.days} days, seed {self.seed}.")
+        run_days = days if days is not None else self.days
+        log.info(f"Starting simulation: {len(world.npcs)} NPCs, {run_days} days, seed {self.seed}.")
         ticks_per_hour = 60 // world.clock.tick_minutes
-        total_ticks = self.days * 24 * ticks_per_hour
+        total_ticks = run_days * 24 * ticks_per_hour
         for _ in range(total_ticks):
             world.update_time()
             self._tick()
