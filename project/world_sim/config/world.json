@@ -1,0 +1,206 @@
+{
+  "clock": {
+    "tick_minutes": 10,
+    "start_day": 1,
+    "start_hour": 6,
+    "start_minute": 0
+  },
+  "simulation": {
+    "days": 30
+  },
+  "memory": {
+    "max_size": 50
+  },
+  "npc_defaults": {
+    "age": 30,
+    "money": 50,
+    "home": "home",
+    "location": "home",
+    "hunger": 20,
+    "energy": 95,
+    "social": 60,
+    "health": 100,
+    "personality": {
+      "sociability": 0.5,
+      "ambition": 0.5,
+      "risk_tolerance": 0.5,
+      "work_ethic": 0.5,
+      "generosity": 0.5
+    }
+  },
+  "locations": [
+    {
+      "id": "home",
+      "name": "Home",
+      "type": "residence",
+      "connected": [
+        "market"
+      ],
+      "resources": [],
+      "activities": [
+        "sleep",
+        "rest"
+      ]
+    },
+    {
+      "id": "farm",
+      "name": "Farm",
+      "type": "workplace",
+      "connected": [
+        "market",
+        "forest"
+      ],
+      "resources": [],
+      "activities": [
+        "work",
+        "rest",
+        "explore"
+      ]
+    },
+    {
+      "id": "market",
+      "name": "Market",
+      "type": "commercial",
+      "connected": [
+        "home",
+        "farm",
+        "tavern"
+      ],
+      "resources": [
+        "food"
+      ],
+      "activities": [
+        "buy_food",
+        "work",
+        "socialize",
+        "rest"
+      ]
+    },
+    {
+      "id": "tavern",
+      "name": "Tavern",
+      "type": "social",
+      "connected": [
+        "market"
+      ],
+      "resources": [],
+      "activities": [
+        "socialize",
+        "work",
+        "rest"
+      ]
+    },
+    {
+      "id": "forest",
+      "name": "Forest",
+      "type": "natural",
+      "connected": [
+        "farm"
+      ],
+      "resources": [
+        "food"
+      ],
+      "activities": [
+        "explore",
+        "forage"
+      ]
+    }
+  ],
+  "resources": [
+    {
+      "id": "food",
+      "name": "Food",
+      "price": 5,
+      "hunger_restore": 80
+    }
+  ],
+  "jobs": [
+    {
+      "id": "farmer",
+      "name": "Farmer",
+      "work_location": "farm",
+      "income_per_tick": 1.0,
+      "energy_cost": 1.0,
+      "shift_ticks": 24
+    },
+    {
+      "id": "merchant",
+      "name": "Merchant",
+      "work_location": "market",
+      "income_per_tick": 1.2,
+      "energy_cost": 0.6,
+      "shift_ticks": 24
+    },
+    {
+      "id": "worker",
+      "name": "Worker",
+      "work_location": "tavern",
+      "income_per_tick": 1.0,
+      "energy_cost": 0.8,
+      "shift_ticks": 24
+    }
+  ],
+  "needs": {
+    "hunger_rate": 0.5,
+    "energy_decay": 0.3,
+    "social_decay": 0.08,
+    "health_damage": 0.15,
+    "health_recover": 0.15,
+    "hunger_critical": 95,
+    "energy_critical": 5,
+    "hunger_safe": 60,
+    "energy_safe": 25,
+    "thresholds": {
+      "health": 25,
+      "hunger": 80,
+      "energy": 20,
+      "money": 20,
+      "social": 20
+    }
+  },
+  "economy": {
+    "market_id": "market",
+    "food_stock": 200,
+    "restock_amount": 200
+  },
+  "shop_hours": {
+    "open": 6,
+    "close": 23
+  },
+  "schedule": {
+    "wake": 6,
+    "work_start": 8,
+    "work_end": 17,
+    "sleep_start": 22,
+    "social_location": "tavern"
+  },
+  "commitment": {
+    "work": 6,
+    "eat": 3,
+    "socialize": 4,
+    "explore": 4,
+    "rest": 3,
+    "sleep": 999,
+    "seek_health": 3
+  },
+  "actions": {
+    "move_edge_ticks": 1,
+    "eat_ticks": 1,
+    "buy_ticks": 3,
+    "food_reserve": 3,
+    "sleep_min_ticks": 3,
+    "sleep_max_ticks": 48,
+    "sleep_energy_restore": 8,
+    "rest_ticks": 12,
+    "socialize_ticks": 4,
+    "social_restore": 15,
+    "relationship_delta": 1,
+    "explore_ticks": 3,
+    "forage_chance": 0.1,
+    "food_cap": 6
+  },
+  "events": {
+    "count": 8,
+    "min_spacing_ticks": 24
+  }
+}
