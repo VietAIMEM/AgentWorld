@@ -29,7 +29,9 @@
   "living_cost": {
     "enabled": true,
     "amount": 15,
-    "interval_days": 1
+    "interval_days": 1,
+    "exempt": 30,
+    "rate": 0.8
   },
   "memory": {
     "max_size": 50

@@ -64,6 +64,8 @@ class World:
         self.living_cost_enabled = bool(living_cfg.get("enabled", False))
         self.living_cost_amount = float(living_cfg.get("amount", 0.0))
         self.living_cost_interval = max(1, int(living_cfg.get("interval_days", 1)))
+        self.living_cost_exempt = float(living_cfg.get("exempt", 0.0))
+        self.living_cost_rate = float(living_cfg.get("rate", 0.0))
         economy_cfg = self.config.get("economy", {})
         self.market_id = economy_cfg.get("market_id", "market")
         clock_cfg = self.config.get("clock", {})
@@ -218,12 +220,14 @@ class World:
             return
         if self._elapsed_days % self.living_cost_interval != 0:
             return
-        amount = self.living_cost_amount
         for npc in self.alive_npcs():
-            if npc.money >= amount:
-                npc.money -= amount
-                self.stats.money_spent += amount
-                log_event(log, f"[{self.clock.stamp()}] {npc.name} paid {amount:.0f} living cost.")
+            fee = self.living_cost_amount + self.living_cost_rate * max(
+                0.0, npc.money - self.living_cost_exempt
+            )
+            if npc.money >= fee:
+                npc.money -= fee
+                self.stats.money_spent += fee
+                log_event(log, f"[{self.clock.stamp()}] {npc.name} paid {fee:.0f} living cost.")
 
     def _age_alive_npcs(self) -> None:
         for npc in self.npcs:
