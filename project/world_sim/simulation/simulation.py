@@ -33,7 +33,7 @@ class Simulation:
         self._total_days = self.days
         self.verbose = verbose
         self.print_report = print_report
-        self.world = World(world_config, npcs_config, self.rng, run_days=self.days)
+        self.world = World(world_config, npcs_config, self.rng, run_days=self.days, seed=self.seed)
         self.decision_system = decision_system or RuleBasedDecisionSystem(world_config, self.rng)
         self.perception_system = PerceptionSystem()
         self.needs_system = NeedsSystem(world_config)

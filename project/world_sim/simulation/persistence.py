@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
+import warnings
 from dataclasses import fields as dc_fields
 from enum import Enum
 from pathlib import Path
@@ -157,6 +159,7 @@ def _npc_to_dict(npc: NPC) -> dict:
         "age": npc.age,
         "money": npc.money,
         "job_id": npc.job.id,
+        "job_work_location": npc.job.work_location,
         "location_id": npc.location_id,
         "home_id": npc.home_id,
         "needs": {
@@ -219,7 +222,7 @@ def _npc_from_dict(data: dict, world) -> NPC:
         name=data["name"],
         age=int(data["age"]),
         money=float(data["money"]),
-        job=world._jobs[data["job_id"]],
+        job=world.get_job(data["job_id"], data.get("job_work_location")),
         location_id=data["location_id"],
         home_id=data["home_id"],
         needs=needs,
@@ -279,6 +282,7 @@ def save_state(sim: Simulation, path) -> None:
     data = {
         "format": SAVE_FORMAT,
         "seed": sim.seed,
+        "world_gen_seed": world._gen_seed,
         "total_days": total_days,
         "rng_state": _to_jsonable(sim.rng.getstate()),
         "clock": {
@@ -342,8 +346,21 @@ def load_state(
     if continue_days is None:
         continue_days = max(0, total_days - elapsed_days)
 
+    world_config_used = world_config
+    if world_config.get("world_generation", {}).get("enabled"):
+        saved_gen_seed = data.get("world_gen_seed")
+        if saved_gen_seed is not None:
+            configured = world_config.get("world_generation", {}).get("seed")
+            if configured is not None and int(configured) != int(saved_gen_seed):
+                warnings.warn(
+                    f"Saved world_gen_seed {saved_gen_seed} differs from configured "
+                    f"seed {configured}; using the saved seed to regenerate the world."
+                )
+            world_config_used = copy.deepcopy(world_config)
+            world_config_used["world_generation"]["seed"] = int(saved_gen_seed)
+
     sim = Simulation(
-        world_config,
+        world_config_used,
         npcs_config,
         seed=seed if seed is not None else int(data["seed"]),
         days=total_days,

@@ -8,6 +8,20 @@
   "simulation": {
     "days": 30
   },
+  "world_generation": {
+    "enabled": false,
+    "seed": null,
+    "settlements": 2,
+    "houses_per_settlement": 10,
+    "forests": 2,
+    "rivers": 1,
+    "mountains": 0,
+    "farms_per_settlement": 1,
+    "workshops_per_settlement": 1,
+    "settlement_roads": true,
+    "resource_density": 1.0,
+    "npc_distribution": "round_robin"
+  },
   "aging": {
     "days_per_year": 365
   },

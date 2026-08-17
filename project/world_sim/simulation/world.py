@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 from ..logging import get_logger, log_event
 from ..npc.memory import Memory
@@ -8,7 +9,9 @@ from ..npc.needs import Needs
 from ..npc.npc import Job, NPC
 from ..npc.personality import Personality
 from ..world.economy import EconomySystem
+from ..world.generator import WorldGenerator
 from ..world.location import Location
+from ..world.region import Region
 from ..world.resource import Resource
 from .clock import Clock
 from .events import EventState, WorldEvent
@@ -34,12 +37,20 @@ class WorldStats:
 
 
 class World:
-    def __init__(self, world_config: dict, npcs_config: dict, rng, run_days: int | None = None):
+    def __init__(
+        self,
+        world_config: dict,
+        npcs_config: dict,
+        rng,
+        run_days: int | None = None,
+        seed: Optional[int] = None,
+    ):
         self.config = world_config
         self.rng = rng
         self._run_days = run_days
         self.locations: dict[str, Location] = {}
         self.resources: dict[str, Resource] = {}
+        self.regions: dict[str, Region] = {}
         self.npcs: list[NPC] = []
         self.dead: list[NPC] = []
         self.events: list[WorldEvent] = []
@@ -68,6 +79,10 @@ class World:
         self.living_cost_rate = float(living_cfg.get("rate", 0.0))
         economy_cfg = self.config.get("economy", {})
         self.market_id = economy_cfg.get("market_id", "market")
+        gen_cfg = self.config.get("world_generation", {})
+        self.generated_world = bool(gen_cfg.get("enabled", False))
+        self._gen_seed: Optional[int] = None
+        self.social_location = self.config.get("schedule", {}).get("social_location", "tavern")
         clock_cfg = self.config.get("clock", {})
         self.clock = Clock(
             tick_minutes=int(clock_cfg.get("tick_minutes", 10)),
@@ -76,9 +91,12 @@ class World:
             minute=int(clock_cfg.get("start_minute", 0)),
         )
         self.economy = EconomySystem(self.config, rng)
-        self._load_locations()
-        self._load_resources()
-        self._load_npcs(npcs_config)
+        if self.generated_world:
+            self._init_generated_world(npcs_config, seed)
+        else:
+            self._load_locations()
+            self._load_resources()
+            self._load_npcs(npcs_config)
         self._schedule_events()
 
     def _load_locations(self) -> None:
@@ -118,36 +136,84 @@ class World:
         self._memory_max_size = max_size
         self._jobs = jobs
         for npc_data in npcs_config.get("npcs", []):
-            personality_data = dict(defaults.get("personality", {}))
-            personality_data.update(npc_data.get("personality", {}))
-            personality = Personality(
-                sociability=personality_data.get("sociability", 0.5),
-                ambition=personality_data.get("ambition", 0.5),
-                risk_tolerance=personality_data.get("risk_tolerance", 0.5),
-                work_ethic=personality_data.get("work_ethic", 0.5),
-                generosity=personality_data.get("generosity", 0.5),
-            )
-            needs = Needs(
-                hunger=float(npc_data.get("hunger", defaults.get("hunger", 20))),
-                energy=float(npc_data.get("energy", defaults.get("energy", 95))),
-                social=float(npc_data.get("social", defaults.get("social", 60))),
-                health=float(npc_data.get("health", defaults.get("health", 100))),
-            )
             home = npc_data.get("home", defaults.get("home", "home"))
             location = npc_data.get("location", home)
-            npc = NPC(
-                id=npc_data["id"],
-                name=npc_data["name"],
-                age=int(npc_data.get("age", defaults.get("age", 30))),
-                money=float(npc_data.get("money", defaults.get("money", 50))),
-                job=jobs[npc_data["job"]],
-                location_id=location,
-                home_id=home,
-                needs=needs,
-                personality=personality,
-                memory=Memory(max_size=max_size),
+            self.npcs.append(self._build_npc(npc_data, defaults, jobs[npc_data["job"]], location, home))
+
+    def _init_generated_world(self, npcs_config: dict, seed: Optional[int]) -> None:
+        gen_cfg = self.config.get("world_generation", {})
+        configured_seed = gen_cfg.get("seed")
+        if configured_seed is not None:
+            gen_seed = int(configured_seed)
+        elif seed is not None:
+            gen_seed = int(seed)
+        else:
+            gen_seed = 0
+        self._gen_seed = gen_seed
+        result = WorldGenerator(self.config, npcs_config, gen_seed).generate()
+        self.locations = result.locations
+        self.regions = result.regions
+        self._load_resources()
+        self._jobs = result.jobs
+        self.market_id = result.market_id
+        self.social_location = result.social_location
+        self.config["schedule"]["social_location"] = result.social_location
+        self._load_generated_npcs(npcs_config, result)
+
+    def _load_generated_npcs(self, npcs_config: dict, result) -> None:
+        defaults = self.config.get("npc_defaults", {})
+        max_size = int(self.config.get("memory", {}).get("max_size", 50))
+        self._memory_max_size = max_size
+        placements = {placement.npc_id: placement for placement in result.placements}
+        for npc_data in npcs_config.get("npcs", []):
+            placement = placements[npc_data["id"]]
+            self.npcs.append(
+                self._build_npc(
+                    npc_data,
+                    defaults,
+                    self._jobs[placement.job_id],
+                    placement.location_id,
+                    placement.home_id,
+                )
             )
-            self.npcs.append(npc)
+
+    def _build_npc(self, npc_data: dict, defaults: dict, job: Job, location_id: str, home_id: str) -> NPC:
+        personality_data = dict(defaults.get("personality", {}))
+        personality_data.update(npc_data.get("personality", {}))
+        personality = Personality(
+            sociability=personality_data.get("sociability", 0.5),
+            ambition=personality_data.get("ambition", 0.5),
+            risk_tolerance=personality_data.get("risk_tolerance", 0.5),
+            work_ethic=personality_data.get("work_ethic", 0.5),
+            generosity=personality_data.get("generosity", 0.5),
+        )
+        needs = Needs(
+            hunger=float(npc_data.get("hunger", defaults.get("hunger", 20))),
+            energy=float(npc_data.get("energy", defaults.get("energy", 95))),
+            social=float(npc_data.get("social", defaults.get("social", 60))),
+            health=float(npc_data.get("health", defaults.get("health", 100))),
+        )
+        return NPC(
+            id=npc_data["id"],
+            name=npc_data["name"],
+            age=int(npc_data.get("age", defaults.get("age", 30))),
+            money=float(npc_data.get("money", defaults.get("money", 50))),
+            job=job,
+            location_id=location_id,
+            home_id=home_id,
+            needs=needs,
+            personality=personality,
+            memory=Memory(max_size=self._memory_max_size),
+        )
+
+    def get_job(self, job_id: str, work_location: Optional[str] = None) -> Job:
+        if job_id in self._jobs:
+            return self._jobs[job_id]
+        if work_location is not None:
+            for job in self._jobs.values():
+                if job.work_location == work_location:
+                    return job
+        raise ValueError(f"Unknown job id {job_id!r} for world.")
 
     def _schedule_events(self) -> None:
         events_cfg = self.config.get("events", {})
@@ -163,13 +229,11 @@ class World:
             attempts += 1
             event_type = self.rng.choice(["festival", "rain"])
             if event_type == "festival":
-                location_id = self.rng.choice(["market", "tavern"])
+                location_id, description = self._festival_venue()
                 duration = self.rng.randint(12, 24)
-                description = f"Festival at {self.get_location(location_id).name}"
             else:
-                location_id = "forest"
+                location_id, description = self._rain_venue()
                 duration = self.rng.randint(12, 36)
-                description = f"Heavy rain at {self.get_location(location_id).name}"
             key = (event_type, location_id)
             start_tick = self.rng.randint(0, max(0, total_ticks - 20))
             if last_start.get(key) is not None and start_tick < last_start[key] + min_spacing:
@@ -185,6 +249,23 @@ class World:
                     location_id=location_id,
                 )
             )
+
+    def _festival_venue(self) -> tuple[str, str]:
+        if self.generated_world:
+            venue_ids = sorted(
+                lid for lid, loc in self.locations.items() if loc.type in ("commercial", "social")
+            )
+            location_id = self.rng.choice(venue_ids) if venue_ids else self.market_id
+            return location_id, f"Festival at {self.get_location(location_id).name}"
+        location_id = self.rng.choice(["market", "tavern"])
+        return location_id, f"Festival at {self.get_location(location_id).name}"
+
+    def _rain_venue(self) -> tuple[str, str]:
+        if self.generated_world:
+            natural_ids = sorted(lid for lid, loc in self.locations.items() if loc.type == "natural")
+            location_id = self.rng.choice(natural_ids) if natural_ids else self.market_id
+            return location_id, f"Heavy rain at {self.get_location(location_id).name}"
+        return "forest", f"Heavy rain at {self.get_location('forest').name}"
 
     def get_location(self, location_id: str) -> Location | None:
         return self.locations.get(location_id)
@@ -260,9 +341,19 @@ class World:
         name = self._newborn_name(ordinal)
         job_list = list(self._jobs.values())
         job = job_list[(ordinal - 1) % len(job_list)]
-        home = defaults.get("home", "home")
-        if home not in self.locations:
-            home = next(iter(self.locations), "home")
+        if self.generated_world:
+            residences = sorted(lid for lid, loc in self.locations.items() if loc.type == "residence")
+            home = residences[(ordinal - 1) % len(residences)] if residences else next(iter(self.locations), "home")
+            settlement = home.split("_house_")[0] if "_house_" in home else None
+            same_settlement = [
+                candidate for candidate in job_list if settlement and candidate.id.endswith(f"_{settlement}")
+            ]
+            if same_settlement:
+                job = same_settlement[(ordinal - 1) % len(same_settlement)]
+        else:
+            home = defaults.get("home", "home")
+            if home not in self.locations:
+                home = next(iter(self.locations), "home")
         personality_data = defaults.get("personality", {})
         personality = Personality(
             sociability=personality_data.get("sociability", 0.5),

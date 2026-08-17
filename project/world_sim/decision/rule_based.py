@@ -85,6 +85,29 @@ def _nearest_natural(world, start_id: str) -> Optional[str]:
     return None
 
 
+def _reachable(world, start_id: str, target_id: str) -> bool:
+    from collections import deque
+
+    if start_id not in world.locations or target_id not in world.locations:
+        return False
+    if start_id == target_id:
+        return True
+    seen = {start_id}
+    queue = deque(world.locations[start_id].connected)
+    while queue:
+        nid = queue.popleft()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        location = world.locations.get(nid)
+        if location is None:
+            continue
+        if nid == target_id:
+            return True
+        queue.extend(location.connected)
+    return False
+
+
 def _explore(npc, perception, world, prio: float) -> Decision:
     goal = Goal(GoalType.EXPLORE, prio)
     location = perception.location
@@ -103,20 +126,29 @@ def _social(npc, perception, world, prio: float, rng, social_location: str) -> D
     hour = world.clock.hour
     evening = work_end <= hour < sleep_start
     at_social = npc.location_id == social_location
+    generated = world.generated_world
+    social_near = any(loc.id == social_location for loc in perception.connected_locations)
+    social_reachable = social_near or (
+        generated and _reachable(world, npc.location_id, social_location)
+    )
+    market_near = any(loc.id == world.market_id for loc in perception.connected_locations)
+    market_reachable = market_near or (
+        generated and _reachable(world, npc.location_id, world.market_id)
+    )
     if perception.nearby_npcs:
         partner = rng.choice(perception.nearby_npcs)
         return _d(goal, "socialize", prio, target_npc=partner.id)
     if evening and not at_social:
-        if any(loc.id == social_location for loc in perception.connected_locations):
+        if social_reachable:
             return _d(goal, "move", prio, social_location)
-        if any(loc.id == world.market_id for loc in perception.connected_locations):
+        if market_reachable:
             return _d(goal, "move", prio, world.market_id)
     location = perception.location
     if location is not None and location.type == "social":
         return _d(goal, "rest", prio)
-    if any(loc.id == social_location for loc in perception.connected_locations):
+    if social_reachable:
         return _d(goal, "move", prio, social_location)
-    if any(loc.id == world.market_id for loc in perception.connected_locations):
+    if market_reachable:
         return _d(goal, "move", prio, world.market_id)
     return _d(goal, "rest", prio)
 
@@ -136,8 +168,11 @@ def _food(npc, perception, world, prio: float, reserve: int, hunger_threshold: f
         return None
     if npc.has_resource("food"):
         return _d(goal, "eat", prio)
-    if can_buy and any(location.id == world.market_id for location in perception.connected_locations):
-        return _d(goal, "move", prio, world.market_id)
+    if can_buy:
+        if any(location.id == world.market_id for location in perception.connected_locations):
+            return _d(goal, "move", prio, world.market_id)
+        if world.generated_world and _reachable(world, npc.location_id, world.market_id):
+            return _d(goal, "move", prio, world.market_id)
     return None
 
 
@@ -249,6 +284,8 @@ class LowFoodStockRule:
         if npc.location_id == world.market_id:
             return _wrap(_d(goal, "buy_food", priority), "low_food_stock", {})
         if any(loc.id == world.market_id for loc in perception.connected_locations):
+            return _wrap(_d(goal, "move", priority, world.market_id), "low_food_stock", {})
+        if world.generated_world and _reachable(world, npc.location_id, world.market_id):
             return _wrap(_d(goal, "move", priority, world.market_id), "low_food_stock", {})
         return None
 
