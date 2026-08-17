@@ -20,6 +20,7 @@ class Job:
     income_per_tick: float
     energy_cost: float
     shift_ticks: int
+    produces_food: bool = False
 
 
 @dataclass

@@ -15,15 +15,22 @@ from .events import EventState, WorldEvent
 
 log = get_logger()
 
+_BABY_NAMES = ["Ava", "Ben", "Cora", "Dex", "Eli", "Faye", "Gus", "Ivy", "Jade", "Kai"]
+
 
 @dataclass
 class WorldStats:
     food_consumed: int = 0
     food_bought: int = 0
+    food_produced: int = 0
+    food_foraged: int = 0
     work_actions: int = 0
     social_interactions: int = 0
     deaths: int = 0
+    births: int = 0
+    old_age_deaths: int = 0
     money_earned: float = 0.0
+    money_spent: float = 0.0
 
 
 class World:
@@ -36,6 +43,26 @@ class World:
         self.dead: list[NPC] = []
         self.events: list[WorldEvent] = []
         self.stats = WorldStats()
+        aging_cfg = self.config.get("aging", {})
+        self.days_per_year = max(1, int(aging_cfg.get("days_per_year", 365)))
+        self._elapsed_days = 0
+        birth_cfg = self.config.get("birth", {})
+        self.birth_enabled = bool(birth_cfg.get("enabled", False))
+        self.birth_interval_days = max(1, int(birth_cfg.get("interval_days", 30)))
+        self.max_population = int(birth_cfg.get("max_population", 50))
+        self.newborn_money = float(birth_cfg.get("money", 10.0))
+        old_age_cfg = self.config.get("old_age", {})
+        self.old_age_enabled = bool(old_age_cfg.get("enabled", False))
+        self.old_age_max_age = int(old_age_cfg.get("max_age", 80))
+        farming_cfg = self.config.get("farming", {})
+        self.farming_enabled = bool(farming_cfg.get("enabled", False))
+        self.farming_yield = int(farming_cfg.get("yield_per_shift", 3))
+        self.farm_stock_cap = int(farming_cfg.get("farm_stock_cap", 100))
+        self.farm_stock = 0
+        living_cfg = self.config.get("living_cost", {})
+        self.living_cost_enabled = bool(living_cfg.get("enabled", False))
+        self.living_cost_amount = float(living_cfg.get("amount", 0.0))
+        self.living_cost_interval = max(1, int(living_cfg.get("interval_days", 1)))
         economy_cfg = self.config.get("economy", {})
         self.market_id = economy_cfg.get("market_id", "market")
         clock_cfg = self.config.get("clock", {})
@@ -82,8 +109,11 @@ class World:
                 income_per_tick=float(job_data.get("income_per_tick", 0.0)),
                 energy_cost=float(job_data.get("energy_cost", 0.0)),
                 shift_ticks=int(job_data.get("shift_ticks", 48)),
+                produces_food=bool(job_data.get("produces_food", False)),
             )
         max_size = int(self.config.get("memory", {}).get("max_size", 50))
+        self._memory_max_size = max_size
+        self._jobs = jobs
         for npc_data in npcs_config.get("npcs", []):
             personality_data = dict(defaults.get("personality", {}))
             personality_data.update(npc_data.get("personality", {}))
@@ -169,8 +199,107 @@ class World:
         day_before = self.clock.day
         self.clock.advance()
         if self.clock.day != day_before:
-            self.economy.restock()
+            self._elapsed_days += 1
+            if self._elapsed_days % self.days_per_year == 0:
+                self._age_alive_npcs()
+            self._check_old_age_deaths()
+            self._maybe_spawn_newborn()
+            self._apply_living_cost()
+            drawn = self.economy.restock(self.farm_stock)
+            self.farm_stock -= drawn
             log_event(log, f"[{self.clock.stamp()}] The Market restocked its food supply.")
+
+    def _apply_living_cost(self) -> None:
+        if not self.living_cost_enabled:
+            return
+        if self._elapsed_days % self.living_cost_interval != 0:
+            return
+        amount = self.living_cost_amount
+        for npc in self.alive_npcs():
+            if npc.money >= amount:
+                npc.money -= amount
+                self.stats.money_spent += amount
+                log_event(log, f"[{self.clock.stamp()}] {npc.name} paid {amount:.0f} living cost.")
+
+    def _age_alive_npcs(self) -> None:
+        for npc in self.npcs:
+            if npc.alive:
+                npc.age += 1
+                log_event(log, f"[{self.clock.stamp()}] {npc.name} turned {npc.age}.")
+
+    def _check_old_age_deaths(self) -> None:
+        if not self.old_age_enabled:
+            return
+        for npc in self.npcs:
+            if npc.alive and npc.age >= self.old_age_max_age:
+                self.npc_die(npc)
+                self.stats.old_age_deaths += 1
+                log_event(log, f"[{self.clock.stamp()}] {npc.name} died of old age at age {npc.age}.")
+
+    def _maybe_spawn_newborn(self) -> None:
+        if not self.birth_enabled:
+            return
+        if self._elapsed_days % self.birth_interval_days != 0:
+            return
+        if len(self.alive_npcs()) >= self.max_population:
+            return
+        self._spawn_newborn()
+
+    def _spawn_newborn(self) -> None:
+        defaults = self.config.get("npc_defaults", {})
+        ordinal = self.stats.births + 1
+        npc_id = self._newborn_id(ordinal)
+        name = self._newborn_name(ordinal)
+        job_list = list(self._jobs.values())
+        job = job_list[(ordinal - 1) % len(job_list)]
+        home = defaults.get("home", "home")
+        if home not in self.locations:
+            home = next(iter(self.locations), "home")
+        personality_data = defaults.get("personality", {})
+        personality = Personality(
+            sociability=personality_data.get("sociability", 0.5),
+            ambition=personality_data.get("ambition", 0.5),
+            risk_tolerance=personality_data.get("risk_tolerance", 0.5),
+            work_ethic=personality_data.get("work_ethic", 0.5),
+            generosity=personality_data.get("generosity", 0.5),
+        )
+        newborn = NPC(
+            id=npc_id,
+            name=name,
+            age=0,
+            money=self.newborn_money,
+            job=job,
+            location_id=home,
+            home_id=home,
+            needs=Needs(
+                hunger=float(defaults.get("hunger", 20)),
+                energy=float(defaults.get("energy", 95)),
+                social=float(defaults.get("social", 60)),
+                health=float(defaults.get("health", 100)),
+            ),
+            personality=personality,
+            memory=Memory(max_size=self._memory_max_size),
+        )
+        self.npcs.append(newborn)
+        self.stats.births += 1
+        log_event(log, f"[{self.clock.stamp()}] {name} was born at {home}.")
+
+    def _newborn_id(self, ordinal: int) -> str:
+        npc_id = f"npc_{ordinal:03d}"
+        while any(npc.id == npc_id for npc in self.npcs):
+            ordinal += 1
+            npc_id = f"npc_{ordinal:03d}"
+        return npc_id
+
+    def _newborn_name(self, ordinal: int) -> str:
+        taken = {npc.name for npc in self.npcs}
+        base = _BABY_NAMES[(ordinal - 1) % len(_BABY_NAMES)]
+        if base not in taken:
+            return base
+        suffix = ordinal
+        while f"{base} {suffix}" in taken:
+            suffix += 1
+        return f"{base} {suffix}"
 
     def is_shop_open(self) -> bool:
         return self.economy.is_shop_open(self.clock)
@@ -187,6 +316,16 @@ class World:
             elif event.state is EventState.ACTIVE and self.clock.tick - event.started_tick >= event.duration_ticks:
                 event.state = EventState.COMPLETED
                 log_event(log, f"[{self.clock.stamp()}] {event.description} ends.")
+
+    def farm_produce(self, amount: int) -> int:
+        if amount <= 0 or not self.farming_enabled:
+            return 0
+        space = self.farm_stock_cap - self.farm_stock
+        produced = min(amount, max(0, space))
+        if produced > 0:
+            self.farm_stock += produced
+            self.stats.food_produced += produced
+        return produced
 
     def npc_die(self, npc: NPC) -> None:
         npc.alive = False

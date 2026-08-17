@@ -8,6 +8,29 @@
   "simulation": {
     "days": 30
   },
+  "aging": {
+    "days_per_year": 365
+  },
+  "birth": {
+    "enabled": false,
+    "interval_days": 30,
+    "max_population": 50,
+    "money": 10
+  },
+  "old_age": {
+    "enabled": false,
+    "max_age": 80
+  },
+  "farming": {
+    "enabled": true,
+    "yield_per_shift": 3,
+    "farm_stock_cap": 100
+  },
+  "living_cost": {
+    "enabled": true,
+    "amount": 15,
+    "interval_days": 1
+  },
   "memory": {
     "max_size": 50
   },
@@ -121,7 +144,8 @@
       "work_location": "farm",
       "income_per_tick": 1.0,
       "energy_cost": 1.0,
-      "shift_ticks": 24
+      "shift_ticks": 24,
+      "produces_food": true
     },
     {
       "id": "merchant",

@@ -28,5 +28,10 @@ class EconomySystem:
         self.food_stock -= 1
         return True
 
-    def restock(self) -> None:
-        self.food_stock = self.restock_amount
+    def restock(self, farm_stock: int) -> int:
+        need = max(0, self.restock_amount - self.food_stock)
+        take = min(farm_stock, need)
+        self.food_stock += take
+        if self.food_stock < self.restock_amount:
+            self.food_stock = self.restock_amount
+        return take

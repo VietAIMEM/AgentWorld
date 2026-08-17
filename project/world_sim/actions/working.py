@@ -38,6 +38,21 @@ class WorkAction(Action):
         npc.add_memory(_stamp(world), "received_money", f"{npc.name} earned {earned:.0f} money.", 3.0, npc.job.id)
         world.stats.work_actions += 1
         log.info(f"[{_stamp(world)}] {npc.name} earned ${earned:.0f}.")
+        if (
+            world.farming_enabled
+            and npc.job.produces_food
+            and npc.location_id == npc.job.work_location
+        ):
+            produced = world.farm_produce(world.farming_yield)
+            if produced > 0:
+                npc.add_memory(
+                    _stamp(world),
+                    "produced_food",
+                    f"{npc.name} harvested {produced} food on the farm.",
+                    3.0,
+                    "food",
+                )
+                log.info(f"[{_stamp(world)}] {npc.name} produced {produced} food on the farm.")
 
     def cancel(self, npc, world) -> None:
         if self.ticks_elapsed > 0:
