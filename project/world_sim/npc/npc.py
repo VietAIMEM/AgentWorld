@@ -35,6 +35,7 @@ class NPC:
     needs: Needs
     personality: Personality
     memory: Memory
+    settlement_id: Optional[str] = None
     relationships: dict = field(default_factory=dict)
     inventory: dict = field(default_factory=dict)
     current_goal: Optional[Goal] = None

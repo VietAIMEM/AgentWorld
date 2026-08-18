@@ -61,7 +61,17 @@ def _health(npc, world, prio: float) -> Decision:
     return _d(goal, "move", prio, npc.home_id)
 
 
-def _nearest_natural(world, start_id: str) -> Optional[str]:
+def _natural_adjacent_to_settlement(world, natural_id: str, settlement_id: str) -> bool:
+    location = world.locations.get(natural_id)
+    if location is None:
+        return False
+    return any(
+        world.locations.get(nid) is not None and world.locations[nid].region_id == settlement_id
+        for nid in location.connected
+    )
+
+
+def _nearest_natural(world, start_id: str, npc=None) -> Optional[str]:
     from collections import deque
 
     start = world.locations.get(start_id)
@@ -70,19 +80,33 @@ def _nearest_natural(world, start_id: str) -> Optional[str]:
     if start.type == "natural":
         return None
     seen = {start_id}
-    queue = deque(start.connected)
+    queue = deque([(start_id, 0)])
+    naturals: list[tuple[int, str, str]] = []
     while queue:
-        loc_id = queue.popleft()
-        if loc_id in seen:
-            continue
-        seen.add(loc_id)
-        location = world.locations.get(loc_id)
-        if location is None:
-            continue
-        if location.type == "natural":
-            return loc_id
-        queue.extend(location.connected)
-    return None
+        loc_id, dist = queue.popleft()
+        for nid in world.locations[loc_id].connected:
+            if nid in seen:
+                continue
+            seen.add(nid)
+            location = world.locations.get(nid)
+            if location is None:
+                continue
+            if location.type == "natural":
+                naturals.append((dist + 1, location.region_id or "", nid))
+            queue.append((nid, dist + 1))
+    if not naturals:
+        return None
+    pool = naturals
+    if npc is not None and world.settlement_economy_enabled:
+        sid = world.npc_settlement(npc)
+        if sid is not None:
+            same_region = [
+                item for item in naturals if _natural_adjacent_to_settlement(world, item[2], sid)
+            ]
+            if same_region:
+                pool = same_region
+    pool.sort(key=lambda item: (item[0], item[2]))
+    return pool[0][2]
 
 
 def _reachable(world, start_id: str, target_id: str) -> bool:
@@ -108,11 +132,58 @@ def _reachable(world, start_id: str, target_id: str) -> bool:
     return False
 
 
+def _fallback_markets(npc, world) -> list[str]:
+    """Deterministic list of non-local markets where the NPC could currently buy food.
+
+    Ordered by (BFS distance from the NPC, market id). Never consumes RNG.
+    Returns an empty list when fallback travel is disabled or no such market exists.
+    """
+    from collections import deque
+
+    if not world.fallback_travel_enabled:
+        return []
+    start = npc.location_id
+    if start not in world.locations:
+        return []
+    local_market = world.local_market_id(npc)
+    results: list[tuple[int, str]] = []
+    seen = {start}
+    queue = deque([(start, 0)])
+    while queue:
+        current, dist = queue.popleft()
+        for nid in world.locations[current].connected:
+            if nid in seen:
+                continue
+            seen.add(nid)
+            location = world.locations.get(nid)
+            if location is None:
+                continue
+            if location.type == "commercial" and nid != local_market:
+                economy = world.economy_for_location(nid)
+                if economy is not None and economy.is_shop_open(world.clock) and economy.can_buy_food(npc, world):
+                    results.append((dist + 1, nid))
+            queue.append((nid, dist + 1))
+    results.sort(key=lambda item: (item[0], item[1]))
+    return [nid for _, nid in results]
+
+
+def _food_market_candidates(npc, world) -> list[str]:
+    """Markets to try for buying food, local first, then deterministic fallbacks."""
+    if not world.settlement_economy_enabled:
+        return [world.market_id]
+    candidates = [world.local_market_id(npc)]
+    if world.fallback_travel_enabled:
+        for market in _fallback_markets(npc, world):
+            if market not in candidates:
+                candidates.append(market)
+    return candidates
+
+
 def _explore(npc, perception, world, prio: float) -> Decision:
     goal = Goal(GoalType.EXPLORE, prio)
     location = perception.location
     if location is not None and location.type != "natural":
-        natural = _nearest_natural(world, npc.location_id)
+        natural = _nearest_natural(world, npc.location_id, npc)
         if natural is not None:
             return _d(goal, "move", prio, natural)
     return _d(goal, "explore", prio)
@@ -125,15 +196,17 @@ def _social(npc, perception, world, prio: float, rng, social_location: str) -> D
     sleep_start = int(schedule.get("sleep_start", 22))
     hour = world.clock.hour
     evening = work_end <= hour < sleep_start
+    social_location = world.local_social_location(npc)
     at_social = npc.location_id == social_location
     generated = world.generated_world
     social_near = any(loc.id == social_location for loc in perception.connected_locations)
     social_reachable = social_near or (
         generated and _reachable(world, npc.location_id, social_location)
     )
-    market_near = any(loc.id == world.market_id for loc in perception.connected_locations)
+    market_id = world.local_market_id(npc)
+    market_near = any(loc.id == market_id for loc in perception.connected_locations)
     market_reachable = market_near or (
-        generated and _reachable(world, npc.location_id, world.market_id)
+        generated and _reachable(world, npc.location_id, market_id)
     )
     if perception.nearby_npcs:
         partner = rng.choice(perception.nearby_npcs)
@@ -142,14 +215,14 @@ def _social(npc, perception, world, prio: float, rng, social_location: str) -> D
         if social_reachable:
             return _d(goal, "move", prio, social_location)
         if market_reachable:
-            return _d(goal, "move", prio, world.market_id)
+            return _d(goal, "move", prio, market_id)
     location = perception.location
     if location is not None and location.type == "social":
         return _d(goal, "rest", prio)
     if social_reachable:
         return _d(goal, "move", prio, social_location)
     if market_reachable:
-        return _d(goal, "move", prio, world.market_id)
+        return _d(goal, "move", prio, market_id)
     return _d(goal, "rest", prio)
 
 
@@ -157,22 +230,33 @@ def _food(npc, perception, world, prio: float, reserve: int, hunger_threshold: f
     goal = Goal(GoalType.EAT, prio)
     if npc.needs.hunger <= hunger_threshold:
         return None
-    at_market = npc.location_id == world.market_id
-    can_buy = world.is_shop_open() and world.economy.can_buy_food(npc, world)
-    stock = npc.inventory.get("food", 0)
-    if at_market:
-        if stock < reserve and can_buy:
+    economy = world.economy_for_location(npc.location_id)
+    if economy is not None:
+        can_buy = (
+            economy.is_shop_open(world.clock)
+            and economy.can_buy_food(npc, world)
+        )
+        if npc.inventory.get("food", 0) < reserve and can_buy:
             return _d(goal, "buy_food", prio)
-        if stock > 0:
+        if npc.has_resource("food"):
             return _d(goal, "eat", prio)
-        return None
-    if npc.has_resource("food"):
+    elif npc.has_resource("food"):
         return _d(goal, "eat", prio)
-    if can_buy:
-        if any(location.id == world.market_id for location in perception.connected_locations):
-            return _d(goal, "move", prio, world.market_id)
-        if world.generated_world and _reachable(world, npc.location_id, world.market_id):
-            return _d(goal, "move", prio, world.market_id)
+    candidates = _food_market_candidates(npc, world)
+    for market in candidates:
+        if market == npc.location_id:
+            continue
+        market_economy = world.economy_for_location(market)
+        if (
+            market_economy is None
+            or not market_economy.is_shop_open(world.clock)
+            or not market_economy.can_buy_food(npc, world)
+        ):
+            continue
+        if any(loc.id == market for loc in perception.connected_locations):
+            return _d(goal, "move", prio, market)
+        if world.generated_world and _reachable(world, npc.location_id, market):
+            return _d(goal, "move", prio, market)
     return None
 
 
@@ -275,18 +359,24 @@ class LowFoodStockRule:
         stock = npc.inventory.get("food", 0)
         if npc.needs.hunger <= self.buy_threshold or stock >= self.reserve:
             return None
-        if not world.is_shop_open():
-            return None
-        if not world.economy.can_buy_food(npc, world):
+        candidates = _food_market_candidates(npc, world)
+        economy = world.economy_for_location(npc.location_id)
+        if economy is None:
+            if world.local_market_enabled:
+                economy = world.economy_for_settlement(world.npc_settlement(npc))
+            else:
+                economy = world.economy
+        if not economy.is_shop_open(world.clock) or not economy.can_buy_food(npc, world):
             return None
         priority = 5.0 + 5.0 * (npc.needs.hunger / 100.0)
         goal = Goal(GoalType.BUY_FOOD, priority)
-        if npc.location_id == world.market_id:
-            return _wrap(_d(goal, "buy_food", priority), "low_food_stock", {})
-        if any(loc.id == world.market_id for loc in perception.connected_locations):
-            return _wrap(_d(goal, "move", priority, world.market_id), "low_food_stock", {})
-        if world.generated_world and _reachable(world, npc.location_id, world.market_id):
-            return _wrap(_d(goal, "move", priority, world.market_id), "low_food_stock", {})
+        for market in candidates:
+            if npc.location_id == market:
+                return _wrap(_d(goal, "buy_food", priority), "low_food_stock", {})
+            if any(loc.id == market for loc in perception.connected_locations):
+                return _wrap(_d(goal, "move", priority, market), "low_food_stock", {})
+            if world.generated_world and _reachable(world, npc.location_id, market):
+                return _wrap(_d(goal, "move", priority, market), "low_food_stock", {})
         return None
 
 

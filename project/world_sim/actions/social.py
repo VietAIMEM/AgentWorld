@@ -49,7 +49,7 @@ class SocializeAction(Action):
             npc.consume_resource("food", 1)
             food = world.resources["food"]
             partner.needs.hunger = max(0.0, partner.needs.hunger - food.hunger_restore)
-            world.stats.food_consumed += 1
+            world.record_food_consumed(npc)
             npc.add_memory(
                 _stamp(world), "shared_food", f"{npc.name} shared food with {partner.name}.", 4.0, partner.id
             )

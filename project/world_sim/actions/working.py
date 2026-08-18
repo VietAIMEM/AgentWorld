@@ -43,7 +43,7 @@ class WorkAction(Action):
             and npc.job.produces_food
             and npc.location_id == npc.job.work_location
         ):
-            produced = world.farm_produce(world.farming_yield)
+            produced = world.add_farm_produce(npc, world.farming_yield)
             if produced > 0:
                 npc.add_memory(
                     _stamp(world),

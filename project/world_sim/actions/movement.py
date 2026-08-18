@@ -35,7 +35,9 @@ class MoveAction(Action):
         self._edge_progress = 0
         if self.path:
             next_id = self.path.pop(0)
+            from_loc = npc.location_id
             npc.move_to(next_id)
+            world.record_settlement_crossing(npc, from_loc, next_id)
             log.info(f"[{_stamp(world)}] {npc.name} went to {world.get_location(next_id).name}.")
 
     def is_complete(self, npc, world) -> bool:

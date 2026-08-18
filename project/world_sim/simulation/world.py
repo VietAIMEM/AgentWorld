@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import warnings
+from dataclasses import dataclass, field
 from typing import Optional
 
 from ..logging import get_logger, log_event
@@ -8,7 +9,7 @@ from ..npc.memory import Memory
 from ..npc.needs import Needs
 from ..npc.npc import Job, NPC
 from ..npc.personality import Personality
-from ..world.economy import EconomySystem
+from ..world.economy import EconomySystem, SettlementEconomy
 from ..world.generator import WorldGenerator
 from ..world.location import Location
 from ..world.region import Region
@@ -34,6 +35,11 @@ class WorldStats:
     old_age_deaths: int = 0
     money_earned: float = 0.0
     money_spent: float = 0.0
+    food_consumed_by_settlement: dict = field(default_factory=dict)
+    food_produced_by_settlement: dict = field(default_factory=dict)
+    food_bought_by_settlement: dict = field(default_factory=dict)
+    food_foraged_by_settlement: dict = field(default_factory=dict)
+    cross_settlement_travel: int = 0
 
 
 class World:
@@ -82,6 +88,28 @@ class World:
         gen_cfg = self.config.get("world_generation", {})
         self.generated_world = bool(gen_cfg.get("enabled", False))
         self._gen_seed: Optional[int] = None
+        se_cfg = self.config.get("settlement_economy", {})
+        self.settlement_economy_enabled = bool(se_cfg.get("enabled", False))
+        if self.settlement_economy_enabled and not self.generated_world:
+            warnings.warn(
+                "settlement_economy.enabled requires world_generation.enabled; "
+                "falling back to the global economy mode."
+            )
+            self.settlement_economy_enabled = False
+        self.settlement_economies: dict[str, SettlementEconomy] = {}
+        self.local_market_enabled = self.settlement_economy_enabled and bool(
+            se_cfg.get("local_market", True)
+        )
+        self.local_farm_stock_enabled = self.settlement_economy_enabled and bool(
+            se_cfg.get("local_farm_stock", True)
+        )
+        self.local_social_enabled = self.settlement_economy_enabled and bool(
+            se_cfg.get("local_social", True)
+        )
+        self.fallback_travel_enabled = self.settlement_economy_enabled and bool(
+            se_cfg.get("fallback_travel", True)
+        )
+        self.trade_enabled = False
         self.social_location = self.config.get("schedule", {}).get("social_location", "tavern")
         clock_cfg = self.config.get("clock", {})
         self.clock = Clock(
@@ -158,7 +186,55 @@ class World:
         self.market_id = result.market_id
         self.social_location = result.social_location
         self.config["schedule"]["social_location"] = result.social_location
+        self._init_settlement_economies()
         self._load_generated_npcs(npcs_config, result)
+
+    def _init_settlement_economies(self) -> None:
+        self.settlement_economies = {}
+        if not self.settlement_economy_enabled:
+            return
+        se_cfg = self.config.get("settlement_economy", {})
+        restock = int(se_cfg.get("restock_amount", self.economy.restock_amount))
+        cap = int(se_cfg.get("farm_stock_cap", self.farm_stock_cap))
+        multiplier = float(se_cfg.get("price_multiplier", 1.0))
+        shop = self.config.get("shop_hours", {})
+        open_hour = int(shop.get("open", 8))
+        close_hour = int(shop.get("close", 20))
+        settlements = sorted(rid for rid, region in self.regions.items() if region.kind == "settlement")
+        for sid in settlements:
+            market = f"{sid}_market"
+            farm = f"{sid}_farm_0"
+            if farm not in self.locations:
+                farms = sorted(lid for lid in self.locations if lid.startswith(f"{sid}_farm_"))
+                farm = farms[0] if farms else market
+            self.settlement_economies[sid] = SettlementEconomy(
+                settlement_id=sid,
+                market_id=market,
+                primary_farm_id=farm,
+                food_stock=restock,
+                restock_amount=restock,
+                farm_stock=0,
+                farm_stock_cap=cap,
+                open_hour=open_hour,
+                close_hour=close_hour,
+                price_multiplier=multiplier,
+            )
+
+    def _restore_settlement_economies(self, items) -> None:
+        self.settlement_economies = {}
+        for item in items:
+            self.settlement_economies[item["settlement_id"]] = SettlementEconomy(
+                settlement_id=item["settlement_id"],
+                market_id=item["market_id"],
+                primary_farm_id=item.get("primary_farm_id", f"{item['settlement_id']}_market"),
+                food_stock=int(item["food_stock"]),
+                restock_amount=int(item["restock_amount"]),
+                farm_stock=int(item["farm_stock"]),
+                farm_stock_cap=int(item["farm_stock_cap"]),
+                open_hour=int(item["open_hour"]),
+                close_hour=int(item["close_hour"]),
+                price_multiplier=float(item.get("price_multiplier", 1.0)),
+            )
 
     def _load_generated_npcs(self, npcs_config: dict, result) -> None:
         defaults = self.config.get("npc_defaults", {})
@@ -174,10 +250,19 @@ class World:
                     self._jobs[placement.job_id],
                     placement.location_id,
                     placement.home_id,
+                    placement.settlement_id,
                 )
             )
 
-    def _build_npc(self, npc_data: dict, defaults: dict, job: Job, location_id: str, home_id: str) -> NPC:
+    def _build_npc(
+        self,
+        npc_data: dict,
+        defaults: dict,
+        job: Job,
+        location_id: str,
+        home_id: str,
+        settlement_id: Optional[str] = None,
+    ) -> NPC:
         personality_data = dict(defaults.get("personality", {}))
         personality_data.update(npc_data.get("personality", {}))
         personality = Personality(
@@ -204,6 +289,7 @@ class World:
             needs=needs,
             personality=personality,
             memory=Memory(max_size=self._memory_max_size),
+            settlement_id=settlement_id,
         )
 
     def get_job(self, job_id: str, work_location: Optional[str] = None) -> Job:
@@ -292,9 +378,18 @@ class World:
             self._check_old_age_deaths()
             self._maybe_spawn_newborn()
             self._apply_living_cost()
-            drawn = self.economy.restock(self.farm_stock)
-            self.farm_stock -= drawn
-            log_event(log, f"[{self.clock.stamp()}] The Market restocked its food supply.")
+            if self.local_farm_stock_enabled:
+                for sid in sorted(self.settlement_economies):
+                    econ = self.settlement_economies[sid]
+                    taken = econ.restock()
+                    log_event(
+                        log,
+                        f"[{self.clock.stamp()}] The market at {sid} restocked its food supply (+{taken}).",
+                    )
+            else:
+                drawn = self.economy.restock(self.farm_stock)
+                self.farm_stock -= drawn
+                log_event(log, f"[{self.clock.stamp()}] The Market restocked its food supply.")
 
     def _apply_living_cost(self) -> None:
         if not self.living_cost_enabled:
@@ -354,6 +449,7 @@ class World:
             home = defaults.get("home", "home")
             if home not in self.locations:
                 home = next(iter(self.locations), "home")
+            settlement = None
         personality_data = defaults.get("personality", {})
         personality = Personality(
             sociability=personality_data.get("sociability", 0.5),
@@ -378,6 +474,7 @@ class World:
             ),
             personality=personality,
             memory=Memory(max_size=self._memory_max_size),
+            settlement_id=settlement,
         )
         self.npcs.append(newborn)
         self.stats.births += 1
@@ -402,6 +499,113 @@ class World:
 
     def is_shop_open(self) -> bool:
         return self.economy.is_shop_open(self.clock)
+
+    def npc_settlement(self, npc) -> Optional[str]:
+        return getattr(npc, "settlement_id", None)
+
+    def economy_for(self, npc):
+        if self.local_market_enabled:
+            sid = self.npc_settlement(npc)
+            if sid is not None and sid in self.settlement_economies:
+                return self.settlement_economies[sid]
+        return self.economy
+
+    def economy_for_settlement(self, settlement_id):
+        if self.local_market_enabled and settlement_id in self.settlement_economies:
+            return self.settlement_economies[settlement_id]
+        return self.economy
+
+    def economy_for_location(self, location_id):
+        if self.local_market_enabled:
+            for econ in self.settlement_economies.values():
+                if econ.market_id == location_id:
+                    return econ
+            return None
+        if location_id == self.market_id:
+            return self.economy
+        return None
+
+    def local_market_id(self, npc) -> str:
+        if self.local_market_enabled:
+            sid = self.npc_settlement(npc)
+            if sid is not None and sid in self.settlement_economies:
+                return self.settlement_economies[sid].market_id
+        return self.market_id
+
+    def local_social_location(self, npc) -> str:
+        if self.local_social_enabled:
+            sid = self.npc_settlement(npc)
+            if sid is not None:
+                tavern = f"{sid}_tavern"
+                if tavern in self.locations:
+                    return tavern
+        return self.social_location
+
+    def local_farm_stock(self, npc) -> int:
+        if self.local_farm_stock_enabled:
+            sid = self.npc_settlement(npc)
+            if sid is not None and sid in self.settlement_economies:
+                return self.settlement_economies[sid].farm_stock
+        return self.farm_stock
+
+    def add_farm_produce(self, npc, amount: int) -> int:
+        if amount <= 0 or not self.farming_enabled:
+            return 0
+        if self.local_farm_stock_enabled:
+            sid = self.npc_settlement(npc)
+            econ = self.settlement_economies.get(sid) if sid is not None else None
+            if econ is not None:
+                produced = econ.farm_produce(amount)
+                if produced > 0:
+                    self.stats.food_produced += produced
+                    per = self.stats.food_produced_by_settlement
+                    per[sid] = per.get(sid, 0) + produced
+                return produced
+        return self.farm_produce(amount)
+
+    def is_shop_open_at(self, location_id) -> bool:
+        econ = self.economy_for_location(location_id)
+        return econ is not None and econ.is_shop_open(self.clock)
+
+    def record_food_consumed(self, npc, amount: int = 1) -> None:
+        self.stats.food_consumed += amount
+        sid = self.npc_settlement(npc)
+        if sid is not None:
+            per = self.stats.food_consumed_by_settlement
+            per[sid] = per.get(sid, 0) + amount
+
+    def record_food_bought(self, npc, amount: int = 1) -> None:
+        self.stats.food_bought += amount
+        sid = self.npc_settlement(npc)
+        if sid is not None:
+            per = self.stats.food_bought_by_settlement
+            per[sid] = per.get(sid, 0) + amount
+
+    def record_food_foraged(self, npc, amount: int = 1) -> None:
+        self.stats.food_foraged += amount
+        sid = self.npc_settlement(npc)
+        if sid is not None:
+            per = self.stats.food_foraged_by_settlement
+            per[sid] = per.get(sid, 0) + amount
+
+    def record_settlement_crossing(self, npc, from_loc_id: str, to_loc_id: str) -> None:
+        if self.npc_settlement(npc) is None:
+            return
+        from_loc = self.locations.get(from_loc_id)
+        to_loc = self.locations.get(to_loc_id)
+        if from_loc is None or to_loc is None:
+            return
+        if from_loc.region_id == to_loc.region_id:
+            return
+        from_region = self.regions.get(from_loc.region_id)
+        to_region = self.regions.get(to_loc.region_id)
+        if (
+            from_region is not None
+            and to_region is not None
+            and from_region.kind == "settlement"
+            and to_region.kind == "settlement"
+        ):
+            self.stats.cross_settlement_travel += 1
 
     def active_events(self) -> list[WorldEvent]:
         return [event for event in self.events if event.state is EventState.ACTIVE]

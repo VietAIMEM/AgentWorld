@@ -4,6 +4,7 @@ import base64
 import copy
 import json
 import warnings
+from dataclasses import MISSING
 from dataclasses import fields as dc_fields
 from enum import Enum
 from pathlib import Path
@@ -162,6 +163,7 @@ def _npc_to_dict(npc: NPC) -> dict:
         "job_work_location": npc.job.work_location,
         "location_id": npc.location_id,
         "home_id": npc.home_id,
+        "settlement_id": npc.settlement_id,
         "needs": {
             "hunger": npc.needs.hunger,
             "energy": npc.needs.energy,
@@ -228,6 +230,7 @@ def _npc_from_dict(data: dict, world) -> NPC:
         needs=needs,
         personality=Personality(**data["personality"]),
         memory=memory,
+        settlement_id=data.get("settlement_id"),
     )
     npc.relationships = dict(data.get("relationships", {}))
     npc.inventory = dict(data.get("inventory", {}))
@@ -272,7 +275,14 @@ def _event_from_dict(data: dict) -> WorldEvent:
 def _world_stats_from_dict(data: dict) -> WorldStats:
     merged = {}
     for field in dc_fields(WorldStats):
-        merged[field.name] = data.get(field.name, field.default)
+        if field.name in data:
+            merged[field.name] = data[field.name]
+        elif field.default is not MISSING:
+            merged[field.name] = field.default
+        elif field.default_factory is not MISSING:
+            merged[field.name] = field.default_factory()
+        else:
+            merged[field.name] = None
     return WorldStats(**merged)
 
 
@@ -294,6 +304,21 @@ def save_state(sim: Simulation, path) -> None:
         },
         "elapsed_days": world._elapsed_days,
         "farm_stock": world.farm_stock,
+        "settlement_economies": [
+            {
+                "settlement_id": econ.settlement_id,
+                "market_id": econ.market_id,
+                "primary_farm_id": econ.primary_farm_id,
+                "food_stock": econ.food_stock,
+                "restock_amount": econ.restock_amount,
+                "farm_stock": econ.farm_stock,
+                "farm_stock_cap": econ.farm_stock_cap,
+                "open_hour": econ.open_hour,
+                "close_hour": econ.close_hour,
+                "price_multiplier": econ.price_multiplier,
+            }
+            for econ in world.settlement_economies.values()
+        ],
         "stats": _to_jsonable(world.stats.__dict__),
         "economy": {
             "food_stock": world.economy.food_stock,
@@ -391,6 +416,8 @@ def load_state(
     world.economy.close_hour = int(economy_data.get("close_hour", world.economy.close_hour))
 
     world.events = [_event_from_dict(event) for event in data["events"]]
+    if "settlement_economies" in data:
+        world._restore_settlement_economies(data["settlement_economies"])
     npcs = [_npc_from_dict(npc_data, world) for npc_data in data["npcs"]]
     npc_by_id = {npc.id: npc for npc in npcs}
     world.npcs = npcs

@@ -203,6 +203,17 @@
     "food_stock": 200,
     "restock_amount": 200
   },
+  "settlement_economy": {
+    "enabled": false,
+    "local_market": true,
+    "local_farm_stock": true,
+    "local_social": true,
+    "fallback_travel": true,
+    "trade": false,
+    "restock_amount": 200,
+    "farm_stock_cap": 100,
+    "price_multiplier": 1.0
+  },
   "shop_hours": {
     "open": 6,
     "close": 23

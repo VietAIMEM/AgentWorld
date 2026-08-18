@@ -31,7 +31,7 @@ class ExploreAction(Action):
             and self.rng.random() < self.forage_chance
         ):
             npc.add_resource("food", 1)
-            world.stats.food_foraged += 1
+            world.record_food_foraged(npc)
             npc.add_memory(_stamp(world), "found_food", f"{npc.name} foraged food in {location.name}.", 3.0, "food")
             log.debug(f"[{_stamp(world)}] {npc.name} found food while exploring.")
 
