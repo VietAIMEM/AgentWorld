@@ -21,3 +21,4 @@ class WorldEvent:
     location_id: Optional[str] = None
     state: EventState = EventState.SCHEDULED
     started_tick: Optional[int] = None
+    social_type: Optional[str] = None

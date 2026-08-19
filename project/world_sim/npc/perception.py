@@ -8,6 +8,8 @@ from typing import Any
 class Perception:
     location: Any
     nearby_npcs: list = field(default_factory=list)
+    objects: list = field(default_factory=list)
+    visible_npcs: list = field(default_factory=list)
     available_resources: list = field(default_factory=list)
     available_activities: list = field(default_factory=list)
     connected_locations: list = field(default_factory=list)
@@ -27,12 +29,15 @@ class PerceptionSystem:
     def perceive(self, npc, world) -> Perception:
         location = world.get_location(npc.location_id)
         nearby = [npc2 for npc2 in world.npcs_at(npc.location_id) if npc2.id != npc.id]
+        objects = list(world.objects_at(npc.location_id)) if hasattr(world, "objects_at") else []
         resources = [world.resources[r] for r in location.resources if r in world.resources]
         connected = [world.get_location(c) for c in location.connected if world.get_location(c) is not None]
         events = [event for event in world.active_events() if event.location_id in (None, location.id)]
         return Perception(
             location=location,
             nearby_npcs=nearby,
+            objects=objects,
+            visible_npcs=list(nearby),
             available_resources=resources,
             available_activities=list(location.activities),
             connected_locations=connected,

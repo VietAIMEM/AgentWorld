@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..npc.intent import clear_intent, set_intent
 from ..npc.needs import clamp
 from .action import Action, log
 
@@ -29,6 +30,7 @@ class SleepAction(Action):
         home_name = world.get_location(npc.home_id).name
         hour = world.clock.hour
         self._night_sleep = hour >= self.sleep_start or hour < self.wake
+        set_intent(npc, world, "sleeping", target_location_id=npc.home_id)
         log.info(f"[{_stamp(world)}] {npc.name} went to sleep at {home_name}.")
 
     def apply(self, npc, world) -> None:
@@ -49,9 +51,11 @@ class SleepAction(Action):
         self._maybe_log_wake(npc, world)
         home_name = world.get_location(npc.home_id).name
         npc.add_memory(_stamp(world), "slept", f"{npc.name} slept at {home_name}.", 2.0, npc.home_id)
+        clear_intent(npc, world)
 
     def cancel(self, npc, world) -> None:
         self._maybe_log_wake(npc, world)
+        clear_intent(npc, world)
 
     def _maybe_log_wake(self, npc, world) -> None:
         if not self._night_sleep:

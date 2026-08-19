@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..npc.intent import clear_intent, set_intent
 from .action import Action, log
 
 
@@ -26,11 +27,22 @@ class SocializeAction(Action):
 
     def start(self, npc, world) -> None:
         npc.last_socialize_day = world.clock.day
+        if getattr(world, "behavior_conversations_enabled", False):
+            partner = world.get_npc(self.partner_id)
+            started = bool(world.start_conversation(npc, self.partner_id))
+            if started:
+                log.debug(f"[{_stamp(world)}] {npc.name} started a conversation with {partner.name}.")
+            elif partner is not None:
+                log.debug(f"[{_stamp(world)}] {npc.name} approached {partner.name}, but the conversation did not start.")
+            return
         partner = world.get_npc(self.partner_id)
+        set_intent(npc, world, "socializing", target_location_id=npc.location_id, target_npc_id=self.partner_id)
         if partner is not None:
             log.debug(f"[{_stamp(world)}] {npc.name} started talking to {partner.name}.")
 
     def apply(self, npc, world) -> None:
+        if getattr(world, "behavior_conversations_enabled", False) and npc.conversation_id is not None:
+            return
         if self._applied:
             return
         partner = world.get_npc(self.partner_id)
@@ -62,3 +74,8 @@ class SocializeAction(Action):
 
     def is_complete(self, npc, world) -> bool:
         return self.ticks_elapsed >= self.ticks
+
+    def finish(self, npc, world) -> None:
+        if getattr(world, "behavior_conversations_enabled", False) and npc.conversation_id is not None:
+            return
+        clear_intent(npc, world)

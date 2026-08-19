@@ -5,13 +5,19 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ..logging import get_logger, log_event
+from ..npc.conversation import Conversation, conversation_settings, threshold_ok
+from ..npc.intent import set_intent
 from ..npc.memory import Memory
 from ..npc.needs import Needs
 from ..npc.npc import Job, NPC
 from ..npc.personality import Personality
+from ..npc.relationships import relationship_tiers_config, social_event_label
+from ..npc.routine import routine_id_for_job
 from ..world.economy import EconomySystem, SettlementEconomy
 from ..world.generator import WorldGenerator
 from ..world.location import Location
+from ..world.object import WorldObject
+from ..world.object_gen import generate_world_objects
 from ..world.region import Region
 from ..world.resource import Resource
 from .clock import Clock
@@ -110,6 +116,53 @@ class World:
             se_cfg.get("fallback_travel", True)
         )
         self.trade_enabled = False
+        behavior_cfg = self.config.get("behavior", {})
+        self.behavior_enabled = bool(behavior_cfg.get("enabled", False))
+        routines_cfg = behavior_cfg.get("routines", False)
+        if isinstance(routines_cfg, dict):
+            self.behavior_routines_enabled = self.behavior_enabled and bool(
+                routines_cfg.get("enabled", False)
+            )
+            self.behavior_routine_default_bias = float(routines_cfg.get("default_bias", 0.5))
+        else:
+            self.behavior_routines_enabled = self.behavior_enabled and bool(routines_cfg)
+            self.behavior_routine_default_bias = 0.5
+        self.behavior_idle_enabled = self.behavior_enabled and bool(
+            behavior_cfg.get("idle", False)
+        )
+        objects_cfg = behavior_cfg.get("objects", False)
+        if isinstance(objects_cfg, dict):
+            self.behavior_objects_enabled = self.behavior_enabled and bool(
+                objects_cfg.get("enabled", False)
+            )
+            self.behavior_interact_cooldown_ticks = int(objects_cfg.get("cooldown_ticks", 6))
+        else:
+            self.behavior_objects_enabled = self.behavior_enabled and bool(objects_cfg)
+            self.behavior_interact_cooldown_ticks = 6
+        self.behavior_interactions_enabled = self.behavior_enabled and bool(
+            behavior_cfg.get("interactions", False)
+        )
+        conversations_cfg = behavior_cfg.get("conversations", False)
+        if isinstance(conversations_cfg, dict):
+            self.behavior_conversations_enabled = self.behavior_enabled and bool(
+                conversations_cfg.get("enabled", False)
+            )
+        else:
+            self.behavior_conversations_enabled = self.behavior_enabled and bool(conversations_cfg)
+        social_life_cfg = behavior_cfg.get("social_life", False)
+        if isinstance(social_life_cfg, dict):
+            self.behavior_social_life_enabled = bool(social_life_cfg.get("enabled", False))
+            self.behavior_social_events_enabled = self.behavior_social_life_enabled and bool(
+                social_life_cfg.get("social_events", False)
+            )
+        else:
+            self.behavior_social_life_enabled = bool(social_life_cfg)
+            self.behavior_social_events_enabled = False
+        self._relationship_tiers = relationship_tiers_config(behavior_cfg)
+        self._conversation_settings = conversation_settings(behavior_cfg, self.config.get("actions", {}))
+        self.objects: list[WorldObject] = []
+        self._objects_by_location: dict[str, list[WorldObject]] = {}
+        self.conversations: list[Conversation] = []
         self.social_location = self.config.get("schedule", {}).get("social_location", "tavern")
         clock_cfg = self.config.get("clock", {})
         self.clock = Clock(
@@ -126,6 +179,8 @@ class World:
             self._load_resources()
             self._load_npcs(npcs_config)
         self._schedule_events()
+        if self.generated_world and self.behavior_objects_enabled:
+            generate_world_objects(self)
 
     def _load_locations(self) -> None:
         for location_data in self.config.get("locations", []):
@@ -278,10 +333,11 @@ class World:
             social=float(npc_data.get("social", defaults.get("social", 60))),
             health=float(npc_data.get("health", defaults.get("health", 100))),
         )
+        age = int(npc_data.get("age", defaults.get("age", 30)))
         return NPC(
             id=npc_data["id"],
             name=npc_data["name"],
-            age=int(npc_data.get("age", defaults.get("age", 30))),
+            age=age,
             money=float(npc_data.get("money", defaults.get("money", 50))),
             job=job,
             location_id=location_id,
@@ -290,6 +346,7 @@ class World:
             personality=personality,
             memory=Memory(max_size=self._memory_max_size),
             settlement_id=settlement_id,
+            routine_id=routine_id_for_job(job.id, age),
         )
 
     def get_job(self, job_id: str, work_location: Optional[str] = None) -> Job:
@@ -335,6 +392,9 @@ class World:
                     location_id=location_id,
                 )
             )
+        if self.behavior_social_events_enabled:
+            for event in self.events:
+                event.social_type = social_event_label(event, self)
 
     def _festival_venue(self) -> tuple[str, str]:
         if self.generated_world:
@@ -364,6 +424,140 @@ class World:
 
     def npcs_at(self, location_id: str) -> list[NPC]:
         return [npc for npc in self.npcs if npc.alive and npc.location_id == location_id]
+
+    def add_object(self, obj: WorldObject) -> None:
+        self.objects.append(obj)
+        self._objects_by_location.setdefault(obj.location_id, []).append(obj)
+
+    def objects_at(self, location_id: str) -> list[WorldObject]:
+        return list(self._objects_by_location.get(location_id, []))
+
+    def release_objects_held_by(self, npc_id: str) -> None:
+        for obj in self.objects:
+            if obj.in_use_by == npc_id:
+                obj.in_use_by = None
+                obj.state = "available"
+
+    def conversation_for(self, npc_id: str) -> Conversation | None:
+        for conv in self.conversations:
+            if conv.initiator_id == npc_id or conv.responder_id == npc_id:
+                return conv
+        return None
+
+    @staticmethod
+    def _conversation_eligible(a: NPC, b: NPC) -> bool:
+        if a is None or b is None:
+            return False
+        if not a.alive or not b.alive:
+            return False
+        if a.location_id != b.location_id:
+            return False
+        if a.conversation_id is not None or b.conversation_id is not None:
+            return False
+        return True
+
+    @staticmethod
+    def _idle_or_socializing(npc: NPC) -> bool:
+        action = npc.current_action
+        if action is None:
+            return True
+        return action.action_type in ("socialize", "rest")
+
+    def start_conversation(self, initiator: NPC, responder_id: str) -> Conversation | None:
+        if not self.behavior_conversations_enabled:
+            return None
+        responder = self.get_npc(responder_id)
+        if responder is None:
+            return None
+        if not self._conversation_eligible(initiator, responder):
+            return None
+        if not self._idle_or_socializing(responder):
+            return None
+        settings = self._conversation_settings
+        if not threshold_ok(
+            f"init|{initiator.id}|{responder.id}|{self.clock.day}|{self.clock.hour}",
+            settings["initiation_threshold"],
+        ):
+            return None
+        if not threshold_ok(
+            f"accept|{responder.id}|{initiator.id}|{self.clock.day}|{self.clock.hour}",
+            settings["acceptance_threshold"],
+        ):
+            return None
+        conv = Conversation(
+            id=f"conv_{self.clock.tick}_{initiator.id}_{responder.id}",
+            initiator_id=initiator.id,
+            responder_id=responder.id,
+            stage="greeting",
+            turns_left=settings["max_turns"],
+            started_tick=self.clock.tick,
+            last_turn_tick=self.clock.tick,
+            started_day=self.clock.day,
+        )
+        initiator.conversation_id = conv.id
+        responder.conversation_id = conv.id
+        initiator.facing = responder.id
+        responder.facing = initiator.id
+        set_intent(initiator, self, "conversing", target_npc_id=responder.id)
+        set_intent(responder, self, "conversing", target_npc_id=initiator.id)
+        self.conversations.append(conv)
+        return conv
+
+    def end_conversation(self, conv: Conversation) -> None:
+        self._clear_conversation_state(conv)
+
+    def force_end_conversation(self, conv: Conversation) -> None:
+        self._clear_conversation_state(conv)
+
+    def _clear_conversation_state(self, conv: Conversation) -> None:
+        initiator = self.get_npc(conv.initiator_id)
+        responder = self.get_npc(conv.responder_id)
+        for npc, partner_id in ((initiator, conv.responder_id), (responder, conv.initiator_id)):
+            if npc is None:
+                continue
+            if npc.conversation_id == conv.id:
+                npc.conversation_id = None
+            if npc.facing == partner_id:
+                npc.facing = None
+            if npc.intent is not None and npc.intent.kind == "conversing":
+                npc.intent = None
+        if conv in self.conversations:
+            self.conversations.remove(conv)
+
+    def _restore_conversations(self, items) -> None:
+        self.conversations = []
+        for item in items:
+            self.conversations.append(
+                Conversation(
+                    id=item["id"],
+                    initiator_id=item["initiator_id"],
+                    responder_id=item["responder_id"],
+                    topic=item.get("topic"),
+                    stage=item.get("stage", "greeting"),
+                    turns_left=int(item.get("turns_left", 4)),
+                    started_tick=int(item.get("started_tick", 0)),
+                    last_turn_tick=int(item.get("last_turn_tick", 0)),
+                    open_slots=int(item.get("open_slots", 2)),
+                    started_day=int(item.get("started_day", 1)),
+                    effects_applied=bool(item.get("effects_applied", False)),
+                )
+            )
+
+    def _restore_objects(self, items) -> None:
+        self.objects = []
+        self._objects_by_location = {}
+        for item in items:
+            self.add_object(
+                WorldObject(
+                    id=item["id"],
+                    name=item["name"],
+                    location_id=item["location_id"],
+                    object_type=item["object_type"],
+                    interactions=list(item.get("interactions", [])),
+                    state=item.get("state", "available"),
+                    in_use_by=item.get("in_use_by"),
+                )
+            )
 
     def alive_npcs(self) -> list[NPC]:
         return [npc for npc in self.npcs if npc.alive]
@@ -475,6 +669,7 @@ class World:
             personality=personality,
             memory=Memory(max_size=self._memory_max_size),
             settlement_id=settlement,
+            routine_id=routine_id_for_job(job.id, 0),
         )
         self.npcs.append(newborn)
         self.stats.births += 1
@@ -633,6 +828,11 @@ class World:
     def npc_die(self, npc: NPC) -> None:
         npc.alive = False
         npc.current_action = None
+        self.release_objects_held_by(npc.id)
+        if npc.conversation_id:
+            conv = self.conversation_for(npc.id)
+            if conv is not None:
+                self.force_end_conversation(conv)
         self.dead.append(npc)
         self.stats.deaths += 1
         log_event(log, f"[{self.clock.stamp()}] {npc.name} has died.")

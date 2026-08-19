@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..npc.intent import clear_intent, set_intent
 from .action import Action, log
 
 
@@ -19,6 +20,7 @@ class EatAction(Action):
         return npc.has_resource("food")
 
     def start(self, npc, world) -> None:
+        set_intent(npc, world, "eating", target_location_id=npc.location_id)
         log.debug(f"[{_stamp(world)}] {npc.name} started eating.")
 
     def apply(self, npc, world) -> None:
@@ -34,6 +36,9 @@ class EatAction(Action):
 
     def is_complete(self, npc, world) -> bool:
         return self._applied or self.ticks_elapsed >= self.ticks
+
+    def finish(self, npc, world) -> None:
+        clear_intent(npc, world)
 
 
 class BuyFoodAction(Action):
@@ -53,6 +58,7 @@ class BuyFoodAction(Action):
         )
 
     def start(self, npc, world) -> None:
+        set_intent(npc, world, "shopping", target_location_id=npc.location_id)
         log.debug(f"[{_stamp(world)}] {npc.name} went shopping at the Market.")
 
     def apply(self, npc, world) -> None:
@@ -70,3 +76,6 @@ class BuyFoodAction(Action):
         if npc.inventory.get("food", 0) >= self.reserve:
             return True
         return self.ticks_elapsed >= self.ticks
+
+    def finish(self, npc, world) -> None:
+        clear_intent(npc, world)

@@ -214,6 +214,49 @@
     "farm_stock_cap": 100,
     "price_multiplier": 1.0
   },
+  "behavior": {
+    "enabled": false,
+    "routines": {
+      "enabled": false,
+      "default_bias": 0.5
+    },
+    "idle": false,
+    "objects": {
+      "enabled": false
+    },
+    "interactions": false,
+    "conversations": {
+      "enabled": false,
+      "max_turns": 4,
+      "initiation_threshold": 0.5,
+      "acceptance_threshold": 0.5,
+      "social_restore": 0,
+      "relationship_delta": 0
+    },
+    "llm": {
+      "enabled": false,
+      "provider": "",
+      "model": "",
+      "temperature": 0.7,
+      "max_tokens": 150,
+      "timeout_seconds": 10,
+      "max_context_memories": 8,
+      "cache_enabled": true,
+      "thoughts_enabled": true,
+      "npc_dialogue": true
+    },
+    "social_life": {
+      "enabled": false,
+      "relationship_tiers": {
+        "friend": 20,
+        "close_friend": 60,
+        "acquaintance": 1,
+        "disliked": -20,
+        "rival": -60
+      },
+      "social_events": false
+    }
+  },
   "shop_hours": {
     "open": 6,
     "close": 23

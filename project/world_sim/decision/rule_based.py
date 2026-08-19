@@ -7,6 +7,8 @@ from typing import Optional
 from ..logging import get_logger
 from ..npc.goals import Goal, GoalGenerator, GoalType
 from ..npc.needs import NeedLevel
+from ..npc.relationships import select_social_partner
+from ..npc.routine import active_block, routine_for_npc
 from .decision_system import Decision, DecisionSystem
 
 log = get_logger()
@@ -209,7 +211,12 @@ def _social(npc, perception, world, prio: float, rng, social_location: str) -> D
         generated and _reachable(world, npc.location_id, market_id)
     )
     if perception.nearby_npcs:
-        partner = rng.choice(perception.nearby_npcs)
+        if getattr(world, "behavior_social_life_enabled", False):
+            partner = select_social_partner(
+                npc, perception.nearby_npcs, getattr(world, "_relationship_tiers", None)
+            )
+        else:
+            partner = rng.choice(perception.nearby_npcs)
         return _d(goal, "socialize", prio, target_npc=partner.id)
     if evening and not at_social:
         if social_reachable:
@@ -461,7 +468,7 @@ class DefaultActivityRule:
         if work_window:
             sleep -= 0.60
 
-        return {
+        scores = {
             "work": work,
             "eat": eat,
             "socialize": social,
@@ -469,6 +476,53 @@ class DefaultActivityRule:
             "explore": explore,
             "sleep": sleep,
         }
+        interact = self._interact_value(npc, world, rest, work_window, night)
+        if interact is not None:
+            scores["interact"] = interact
+        return scores
+
+    def _wanted_interaction(self, npc) -> str:
+        if npc.needs.energy < 55.0:
+            return "sit"
+        if npc.needs.social < 45.0:
+            return "inspect"
+        if npc.needs.energy < 85.0:
+            return "use"
+        return "tend"
+
+    def _interact_value(self, npc, world, rest, work_window, night) -> Optional[float]:
+        if not getattr(world, "behavior_interactions_enabled", False):
+            return None
+        if not getattr(world, "behavior_objects_enabled", False):
+            return None
+        cooldown = getattr(world, "behavior_interact_cooldown_ticks", 6)
+        if npc.last_interact_tick is not None:
+            if world.clock.tick - npc.last_interact_tick < cooldown:
+                return None
+        wanted = self._wanted_interaction(npc)
+        if not any(
+            obj.is_available() and wanted in obj.interactions
+            for obj in world.objects_at(npc.location_id)
+        ):
+            return None
+        value = rest + 0.02
+        if work_window:
+            value -= 1.5
+        if night:
+            value -= 1.0
+        return value
+
+    def _pick_interaction_object(self, npc, world):
+        wanted = self._wanted_interaction(npc)
+        candidates = [
+            obj
+            for obj in world.objects_at(npc.location_id)
+            if obj.is_available() and wanted in obj.interactions
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda obj: obj.id)
+        return candidates[0]
 
     def evaluate(self, npc, perception, world) -> Optional[Decision]:
         hour = world.clock.hour
@@ -499,7 +553,58 @@ class DefaultActivityRule:
             return _wrap(_explore(npc, perception, world, prio), reason, scores)
         if best == "sleep":
             return _wrap(_sleep(npc, world, prio), reason, scores)
+        if best == "interact":
+            target = self._pick_interaction_object(npc, world)
+            if target is None:
+                return _wrap(_rest(npc, prio), reason, scores)
+            candidates = dict(scores)
+            candidates["target_object_id"] = target.id
+            candidates["interaction"] = self._wanted_interaction(npc)
+            return _wrap(
+                _d(Goal(GoalType.REST, prio, npc.location_id), "interact", prio),
+                reason,
+                candidates,
+            )
         return _wrap(_rest(npc, prio), reason, scores)
+
+
+class RoutineRule(DefaultActivityRule):
+    """Biases default activity scores with the NPC's daily routine.
+
+    Only active when behavior.routines.enabled is true. Urgent needs are
+    handled by the rules evaluated before this one, so they always win.
+    Commitment logic in RuleBasedDecisionSystem.decide remains authoritative.
+    Consumes zero simulation RNG.
+    """
+
+    def __init__(self, config: dict, rng, generator: GoalGenerator):
+        super().__init__(config, rng, generator)
+        behavior_cfg = config.get("behavior", {})
+        routines_cfg = behavior_cfg.get("routines", False)
+        if isinstance(routines_cfg, dict):
+            self.default_bias = float(routines_cfg.get("default_bias", 0.5))
+        else:
+            self.default_bias = 0.5
+
+    def evaluate(self, npc, perception, world) -> Optional[Decision]:
+        if not world.behavior_routines_enabled:
+            return None
+        return super().evaluate(npc, perception, world)
+
+    def _score(self, npc, perception, world) -> dict:
+        scores = super()._score(npc, perception, world)
+        bias = self._routine_bias(npc, world)
+        return {key: scores[key] + bias.get(key, 0.0) for key in scores}
+
+    def _routine_bias(self, npc, world) -> dict:
+        result = {key: 0.0 for key in ("work", "eat", "socialize", "rest", "explore", "sleep")}
+        if not world.behavior_routines_enabled:
+            return result
+        scale = getattr(world, "behavior_routine_default_bias", self.default_bias)
+        block = active_block(routine_for_npc(npc, world), world.clock.hour)
+        if block is not None and block.activity in result:
+            result[block.activity] = block.bias * scale
+        return result
 
 
 class RuleBasedDecisionSystem(DecisionSystem):
@@ -517,6 +622,7 @@ class RuleBasedDecisionSystem(DecisionSystem):
             LowMoneyRule(config, self.generator),
             LowSocialRule(config, self.generator, self.rng),
             LowFoodStockRule(config, self.generator),
+            RoutineRule(config, self.rng, self.generator),
             DefaultActivityRule(config, self.rng, self.generator),
         ]
 

@@ -12,6 +12,7 @@ from typing import Optional
 
 from ..actions.eating import BuyFoodAction, EatAction
 from ..actions.exploring import ExploreAction
+from ..actions.interacting import InteractAction
 from ..actions.movement import MoveAction
 from ..actions.resting import RestAction
 from ..actions.sleeping import SleepAction
@@ -19,6 +20,7 @@ from ..actions.social import SocializeAction
 from ..actions.working import WorkAction
 from ..decision.decision_system import Decision
 from ..npc.goals import Goal, GoalStatus, GoalType
+from ..npc.intent import Intent
 from ..npc.memory import Memory, MemoryEntry
 from ..npc.needs import Needs
 from ..npc.npc import NPC
@@ -39,6 +41,7 @@ ACTION_CLASSES = {
     "socialize": SocializeAction,
     "rest": RestAction,
     "explore": ExploreAction,
+    "interact": InteractAction,
 }
 
 _EXCLUDED_ACTION_FIELDS = {"rng", "config", "decision", "priority", "ticks_elapsed", "_actions_cfg"}
@@ -153,6 +156,32 @@ def _action_from_dict(data: dict, rng, config):
     return action
 
 
+def _intent_to_dict(intent: Optional[Intent]) -> Optional[dict]:
+    if intent is None:
+        return None
+    return {
+        "kind": intent.kind,
+        "started_tick": intent.started_tick,
+        "target_location_id": intent.target_location_id,
+        "target_npc_id": intent.target_npc_id,
+        "target_object_id": intent.target_object_id,
+        "context": intent.context,
+    }
+
+
+def _intent_from_dict(data) -> Optional[Intent]:
+    if data is None:
+        return None
+    return Intent(
+        kind=data["kind"],
+        started_tick=int(data.get("started_tick", 0)),
+        target_location_id=data.get("target_location_id"),
+        target_npc_id=data.get("target_npc_id"),
+        target_object_id=data.get("target_object_id"),
+        context=data.get("context", ""),
+    )
+
+
 def _npc_to_dict(npc: NPC) -> dict:
     return {
         "id": npc.id,
@@ -164,6 +193,12 @@ def _npc_to_dict(npc: NPC) -> dict:
         "location_id": npc.location_id,
         "home_id": npc.home_id,
         "settlement_id": npc.settlement_id,
+        "facing": npc.facing,
+        "intent": _intent_to_dict(npc.intent),
+        "routine_id": npc.routine_id,
+        "conversation_id": npc.conversation_id,
+        "idle_state": npc.idle_state,
+        "last_interact_tick": npc.last_interact_tick,
         "needs": {
             "hunger": npc.needs.hunger,
             "energy": npc.needs.energy,
@@ -232,6 +267,12 @@ def _npc_from_dict(data: dict, world) -> NPC:
         memory=memory,
         settlement_id=data.get("settlement_id"),
     )
+    npc.facing = data.get("facing")
+    npc.intent = _intent_from_dict(data.get("intent"))
+    npc.routine_id = data.get("routine_id")
+    npc.conversation_id = data.get("conversation_id")
+    npc.idle_state = data.get("idle_state")
+    npc.last_interact_tick = data.get("last_interact_tick")
     npc.relationships = dict(data.get("relationships", {}))
     npc.inventory = dict(data.get("inventory", {}))
     npc.alive = bool(data.get("alive", True))
@@ -247,7 +288,7 @@ def _npc_from_dict(data: dict, world) -> NPC:
 
 
 def _event_to_dict(event: WorldEvent) -> dict:
-    return {
+    data = {
         "id": event.id,
         "type": event.type,
         "description": event.description,
@@ -257,6 +298,9 @@ def _event_to_dict(event: WorldEvent) -> dict:
         "state": event.state.value,
         "started_tick": event.started_tick,
     }
+    if event.social_type is not None:
+        data["social_type"] = event.social_type
+    return data
 
 
 def _event_from_dict(data: dict) -> WorldEvent:
@@ -269,6 +313,7 @@ def _event_from_dict(data: dict) -> WorldEvent:
         location_id=data.get("location_id"),
         state=EventState(data.get("state", "scheduled")),
         started_tick=data.get("started_tick"),
+        social_type=data.get("social_type"),
     )
 
 
@@ -330,6 +375,36 @@ def save_state(sim: Simulation, path) -> None:
         "dead_ids": [npc.id for npc in world.dead],
         "npcs": [_npc_to_dict(npc) for npc in world.npcs],
     }
+    if world.objects:
+        data["objects"] = [
+            {
+                "id": obj.id,
+                "name": obj.name,
+                "location_id": obj.location_id,
+                "object_type": obj.object_type,
+                "interactions": list(obj.interactions),
+                "state": obj.state,
+                "in_use_by": obj.in_use_by,
+            }
+            for obj in world.objects
+        ]
+    if world.conversations:
+        data["conversations"] = [
+            {
+                "id": conv.id,
+                "initiator_id": conv.initiator_id,
+                "responder_id": conv.responder_id,
+                "topic": conv.topic,
+                "stage": conv.stage,
+                "turns_left": conv.turns_left,
+                "started_tick": conv.started_tick,
+                "last_turn_tick": conv.last_turn_tick,
+                "open_slots": conv.open_slots,
+                "started_day": conv.started_day,
+                "effects_applied": conv.effects_applied,
+            }
+            for conv in world.conversations
+        ]
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -418,6 +493,10 @@ def load_state(
     world.events = [_event_from_dict(event) for event in data["events"]]
     if "settlement_economies" in data:
         world._restore_settlement_economies(data["settlement_economies"])
+    if "objects" in data:
+        world._restore_objects(data["objects"])
+    if "conversations" in data:
+        world._restore_conversations(data["conversations"])
     npcs = [_npc_from_dict(npc_data, world) for npc_data in data["npcs"]]
     npc_by_id = {npc.id: npc for npc in npcs}
     world.npcs = npcs
