@@ -7,9 +7,11 @@ from typing import Optional
 from ..actions.action import ActionManager
 from ..decision.rule_based import RuleBasedDecisionSystem
 from ..logging import get_logger
+from ..npc.conversation import ConversationSystem
 from ..npc.memory import MemorySystem
 from ..npc.needs import NeedsSystem
 from ..npc.perception import PerceptionSystem
+from ..npc.social_memory import SocialMemorySystem
 from .world import World
 
 log = get_logger()
@@ -39,6 +41,8 @@ class Simulation:
         self.needs_system = NeedsSystem(world_config)
         self.memory_system = MemorySystem()
         self.action_manager = ActionManager(self.rng, world_config)
+        self.conversation_system = ConversationSystem(world_config)
+        self.social_memory_system = SocialMemorySystem()
         self._hunger_threshold = float(
             world_config.get("needs", {}).get("thresholds", {}).get("hunger", 80)
         )
@@ -73,6 +77,8 @@ class Simulation:
             action.tick(npc, world)
             self._check_death(npc)
         world.process_events()
+        self.conversation_system.tick(world)
+        self.social_memory_system.tick(world)
 
     def _check_death(self, npc) -> None:
         if npc.needs.health <= 0.0 and npc.alive:

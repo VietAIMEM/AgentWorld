@@ -60,6 +60,7 @@ class ActionManager:
     def __init__(self, rng, config: dict):
         from .eating import BuyFoodAction, EatAction
         from .exploring import ExploreAction
+        from .interacting import InteractAction
         from .movement import MoveAction
         from .resting import RestAction
         from .sleeping import SleepAction
@@ -77,6 +78,7 @@ class ActionManager:
             "socialize": SocializeAction,
             "rest": RestAction,
             "explore": ExploreAction,
+            "interact": InteractAction,
         }
 
     def register(self, name: str, action_cls: type) -> None:

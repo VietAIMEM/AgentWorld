@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 
+from ..npc.intent import set_intent
 from .action import Action, log
 
 
@@ -27,6 +28,12 @@ class MoveAction(Action):
         if self.target and self.target != npc.location_id:
             target_name = world.get_location(self.target).name
             log.debug(f"[{_stamp(world)}] {npc.name} decided to go to {target_name}.")
+            if self.target == npc.job.work_location:
+                set_intent(npc, world, "commute_to_work", target_location_id=self.target)
+            elif self.target == npc.home_id:
+                set_intent(npc, world, "returning_home", target_location_id=self.target)
+            else:
+                set_intent(npc, world, "traveling", target_location_id=self.target)
 
     def apply(self, npc, world) -> None:
         self._edge_progress += 1

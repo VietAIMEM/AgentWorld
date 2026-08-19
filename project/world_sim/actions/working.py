@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..npc.intent import clear_intent, set_intent
 from ..npc.needs import clamp
 from .action import Action, log
 
@@ -21,6 +22,7 @@ class WorkAction(Action):
     def start(self, npc, world) -> None:
         self.shift_ticks = npc.job.shift_ticks
         location_name = world.get_location(npc.job.work_location).name
+        set_intent(npc, world, "working", target_location_id=npc.job.work_location)
         log.info(f"[{_stamp(world)}] {npc.name} started working at {location_name}.")
 
     def apply(self, npc, world) -> None:
@@ -37,6 +39,7 @@ class WorkAction(Action):
         npc.add_memory(_stamp(world), "worked", f"{npc.name} worked as a {npc.job.name}.", 3.0, npc.job.id)
         npc.add_memory(_stamp(world), "received_money", f"{npc.name} earned {earned:.0f} money.", 3.0, npc.job.id)
         world.stats.work_actions += 1
+        clear_intent(npc, world)
         log.info(f"[{_stamp(world)}] {npc.name} earned ${earned:.0f}.")
         if (
             world.farming_enabled
